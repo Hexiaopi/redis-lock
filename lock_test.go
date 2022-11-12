@@ -24,7 +24,7 @@ func TestClient_ObtainLock(t *testing.T) {
 		before     func()
 		after      func()
 		wantErr    error
-		want       *Lock
+		want       *lock
 	}{
 		{
 			name:       "正常获取锁",
@@ -36,7 +36,7 @@ func TestClient_ObtainLock(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, int64(1), res)
 			},
-			want: &Lock{
+			want: &lock{
 				key: "test-lock-key",
 			},
 		},
@@ -80,7 +80,7 @@ func TestLock_Release(t *testing.T) {
 		DB:       0,
 	})
 	client := NewClient(rdb)
-	lock, err := client.ObtainLock(context.Background(), "test-lock-key", time.Minute)
+	lock, err := client.ObtainLock(context.Background(), "test-lock-key", time.Second*10)
 	require.NoError(t, err)
 	require.NotNil(t, lock)
 	testCases := []struct {
@@ -94,6 +94,20 @@ func TestLock_Release(t *testing.T) {
 			before:  func() {},
 			after:   func() {},
 			wantErr: nil,
+		},
+		{
+			name: "锁已被他人获取",
+			before: func() { //模拟别人已经获取锁
+				res, err := rdb.Set(context.Background(), "test-lock-key", "123", time.Minute).Result()
+				require.NoError(t, err)
+				require.Equal(t, "OK", res)
+			},
+			after: func() { //确认是否改了别人的锁
+				res, err := rdb.Get(context.Background(), "test-lock-key").Result()
+				require.NoError(t, err)
+				require.Equal(t, "123", res)
+			},
+			wantErr: ErrReleaseLockFail,
 		},
 	}
 	for _, tc := range testCases {
