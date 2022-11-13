@@ -2,119 +2,150 @@ package redislock
 
 import (
 	"context"
+	_ "embed"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/go-redis/redis/v9"
+	gomock "github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestClient_ObtainLock(t *testing.T) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	client := NewClient(rdb)
-	testCases := []struct {
-		name       string
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	type fields struct {
+		client redis.Cmdable
+	}
+	type args struct {
+		ctx        context.Context
 		key        string
 		expiration time.Duration
-		before     func()
-		after      func()
-		wantErr    error
-		want       *lock
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    *lock
+		wantErr error
 	}{
 		{
-			name:       "正常获取锁",
-			key:        "test-lock-key",
-			expiration: time.Minute,
-			before:     func() {},
-			after: func() {
-				res, err := rdb.Del(context.Background(), "test-lock-key").Result()
-				require.NoError(t, err)
-				require.Equal(t, int64(1), res)
-			},
-			want: &lock{
-				key: "test-lock-key",
-			},
+			name: "正常测试",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				res := redis.NewBoolResult(true, nil)
+				rdb.EXPECT().SetNX(gomock.Any(), "test-locked-key", gomock.Any(), time.Minute).Return(res)
+				return rdb
+			}()},
+			args:    args{context.Background(), "test-locked-key", time.Minute},
+			want:    &lock{key: "test-locked-key"},
+			wantErr: nil,
 		},
 		{
-			name:       "别人已经获取锁",
-			key:        "test-lock-key-exists",
-			expiration: time.Minute,
-			before: func() { //模拟别人已经获取锁
-				res, err := rdb.Set(context.Background(), "test-lock-key-exists", "123", time.Minute).Result()
-				require.NoError(t, err)
-				require.Equal(t, "OK", res)
-			},
-			after: func() { //确认是否改了别人的锁
-				res, err := rdb.Get(context.Background(), "test-lock-key-exists").Result()
-				require.NoError(t, err)
-				require.Equal(t, "123", res)
-			},
-			wantErr: ErrObtainLockFail,
+			name: "网络错误",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				res := redis.NewBoolResult(false, errors.New("network error"))
+				rdb.EXPECT().SetNX(gomock.Any(), "network-key", gomock.Any(), time.Minute).Return(res)
+				return rdb
+			}()},
+			args:    args{context.Background(), "network-key", time.Minute},
 			want:    nil,
+			wantErr: errors.New("network error"),
+		},
+		{
+			name: "加锁失败",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				res := redis.NewBoolResult(false, nil)
+				rdb.EXPECT().SetNX(gomock.Any(), "test-lock-key", gomock.Any(), time.Minute).Return(res)
+				return rdb
+			}()},
+			args:    args{context.Background(), "test-lock-key", time.Minute},
+			want:    nil,
+			wantErr: ErrObtainLockFail,
 		},
 	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.before()
-			lock, err := client.ObtainLock(context.Background(), tc.key, tc.expiration)
-			assert.Equal(t, tc.wantErr, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Client{
+				client: tt.fields.client,
+			}
+			got, err := c.ObtainLock(tt.args.ctx, tt.args.key, tt.args.expiration)
+			assert.Equal(t, tt.wantErr, err)
 			if err != nil {
 				return
 			}
-			tc.after()
-			assert.NotNil(t, lock)
-			assert.Equal(t, tc.want.key, lock.key)
+			assert.NotNil(t, got)
+			assert.Equal(t, tt.want.key, got.key)
 		})
 	}
 }
 
-func TestLock_Release(t *testing.T) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	client := NewClient(rdb)
-	lock, err := client.ObtainLock(context.Background(), "test-lock-key", time.Second*10)
-	require.NoError(t, err)
-	require.NotNil(t, lock)
-	testCases := []struct {
+func Test_lock_Release(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	type fields struct {
+		client redis.Cmdable
+	}
+	type args struct {
+		ctx context.Context
+	}
+	tests := []struct {
 		name    string
-		before  func()
-		after   func()
+		fields  fields
+		args    args
 		wantErr error
 	}{
 		{
-			name:    "正常删除",
-			before:  func() {},
-			after:   func() {},
+			name: "正常测试",
+			fields: fields{
+				client: func() redis.Cmdable {
+					rdb := NewMockCmdable(ctrl)
+					cmd := redis.NewCmd(context.Background())
+					cmd.SetVal(int64(1))
+					rdb.EXPECT().Eval(gomock.Any(), releaseLua, gomock.Any(), gomock.Any()).Return(cmd)
+					return rdb
+				}(),
+			},
+			args:    args{context.Background()},
 			wantErr: nil,
 		},
 		{
-			name: "锁已被他人获取",
-			before: func() { //模拟别人已经获取锁
-				res, err := rdb.Set(context.Background(), "test-lock-key", "123", time.Minute).Result()
-				require.NoError(t, err)
-				require.Equal(t, "OK", res)
+			name: "网络错误",
+			fields: fields{
+				client: func() redis.Cmdable {
+					rdb := NewMockCmdable(ctrl)
+					cmd := redis.NewCmd(context.Background())
+					cmd.SetErr(errors.New("network error"))
+					rdb.EXPECT().Eval(gomock.Any(), releaseLua, gomock.Any(), gomock.Any()).Return(cmd)
+					return rdb
+				}(),
 			},
-			after: func() { //确认是否改了别人的锁
-				res, err := rdb.Get(context.Background(), "test-lock-key").Result()
-				require.NoError(t, err)
-				require.Equal(t, "123", res)
+			args:    args{context.Background()},
+			wantErr: errors.New("network error"),
+		},
+		{
+			name: "释放锁失败",
+			fields: fields{
+				client: func() redis.Cmdable {
+					rdb := NewMockCmdable(ctrl)
+					cmd := redis.NewCmd(context.Background())
+					cmd.SetVal(int64(0))
+					rdb.EXPECT().Eval(gomock.Any(), releaseLua, gomock.Any(), gomock.Any()).Return(cmd)
+					return rdb
+				}(),
 			},
+			args:    args{context.Background()},
 			wantErr: ErrReleaseLockFail,
 		},
 	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.before()
-			err := lock.Release(context.Background())
-			assert.Equal(t, tc.wantErr, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newLock(tt.fields.client, "test-failed-key", "test-failed-value")
+			err := c.Release(tt.args.ctx)
+			assert.Equal(t, tt.wantErr, err)
 		})
 	}
 }
