@@ -21,6 +21,8 @@ var (
 	releaseLua string
 	//go:embed refresh.lua
 	refreshLua string
+	//go:embed lock.lua
+	lockLua string
 )
 
 type Client struct {
@@ -39,6 +41,41 @@ type lock struct {
 	value      string
 	expiration time.Duration
 	release    chan struct{}
+}
+
+func (c *Client) Lock(ctx context.Context, key string, expiration time.Duration, try RetryStrategy) (*lock, error) {
+	value := uuid.New().String()
+	var ticker *time.Ticker
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	for {
+		res, err := c.client.Eval(ctx, lockLua, []string{key}, value, expiration.Milliseconds()).Result()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if res == "OK" {
+			return newLock(c.client, key, value, expiration), nil
+		}
+		retry, interval := try.Next()
+		if !retry {
+			if err != nil {
+				return nil, err
+			}
+			return nil, ErrObtainLockFail
+		}
+		if ticker == nil {
+			ticker = time.NewTicker(interval)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+
 }
 
 func (c *Client) ObtainLock(ctx context.Context, key string, expiration time.Duration) (*lock, error) {

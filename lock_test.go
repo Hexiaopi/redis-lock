@@ -13,6 +13,123 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestClient_Lock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	type fields struct {
+		client redis.Cmdable
+	}
+	type args struct {
+		timeout    time.Duration
+		key        string
+		expiration time.Duration
+		try        RetryStrategy
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    *lock
+		wantErr error
+	}{
+		{
+			name: "正常测试",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetVal("OK")
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"locked-key"}, gomock.Any()).Return(cmd)
+				return rdb
+			}()},
+			args:    args{time.Minute, "locked-key", time.Second, LimitedRetry(time.Millisecond*100, 3)},
+			want:    &lock{key: "locked-key", expiration: time.Second},
+			wantErr: nil,
+		},
+		{
+			name: "网络错误",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetErr(errors.New("network error"))
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"locked-key"}, gomock.Any()).Return(cmd)
+				return rdb
+			}()},
+			args:    args{time.Minute, "locked-key", time.Second, LimitedRetry(time.Millisecond*100, 3)},
+			wantErr: errors.New("network error"),
+		},
+		{
+			name: "网络超时错误",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetErr(context.DeadlineExceeded)
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"locked-key"}, gomock.Any()).Times(3).Return(cmd) //执行三次
+				return rdb
+			}()},
+			args:    args{time.Minute, "locked-key", time.Second, LimitedRetry(time.Millisecond*100, 3)},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "整体超时错误",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetErr(context.DeadlineExceeded)
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"locked-key"}, gomock.Any()).Times(3).Return(cmd) //执行3次
+				return rdb
+			}()},
+			args:    args{time.Second, "locked-key", time.Second, LimitedRetry(time.Millisecond*400, 3)}, //重试2次后超时
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "不重试错误",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetErr(context.DeadlineExceeded)
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"locked-key"}, gomock.Any()).Return(cmd) //执行1次
+				return rdb
+			}()},
+			args:    args{time.Second, "locked-key", time.Second, NoRetry()},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "重试三次成功",
+			fields: fields{client: func() redis.Cmdable {
+				rdb := NewMockCmdable(ctrl)
+				first := redis.NewCmd(context.Background())
+				first.SetVal("")
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"retry-key"}, gomock.Any()).Times(2).Return(first) //前两次拿不到
+				cmd := redis.NewCmd(context.Background())
+				cmd.SetVal("OK")
+				rdb.EXPECT().Eval(gomock.Any(), lockLua, []string{"retry-key"}, gomock.Any()).Return(cmd) //第三次拿到
+				return rdb
+			}()},
+			args:    args{time.Minute, "retry-key", time.Second, LimitedRetry(time.Millisecond*100, 3)},
+			want:    &lock{key: "retry-key", expiration: time.Second},
+			wantErr: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Client{
+				client: tt.fields.client,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), tt.args.timeout)
+			defer cancel()
+			got, err := c.Lock(ctx, tt.args.key, tt.args.expiration, tt.args.try)
+			assert.Equal(t, tt.wantErr, err)
+			if err != nil {
+				return
+			}
+			assert.NotNil(t, got)
+			assert.Equal(t, tt.want.key, got.key)
+			assert.Equal(t, tt.want.expiration, got.expiration)
+			assert.NotEmpty(t, got.value)
+		})
+	}
+}
+
 func TestClient_ObtainLock(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
