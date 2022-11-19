@@ -13,6 +13,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestClient_SingleFlightLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	rdb := NewMockCmdable(ctrl)
+	cmd := redis.NewCmd(context.Background())
+	cmd.SetVal("OK")
+	rdb.EXPECT().Eval(gomock.Any(), lockLua, gomock.Any(), gomock.Any()).Return(cmd)
+	client := NewClient(rdb)
+	_, err := client.SingleFlightLock(context.Background(), "singleflight-key", time.Minute, LimitedRetry(time.Second*30, 3))
+	require.NoError(t, err)
+}
+
 func TestClient_Lock(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
