@@ -50,7 +50,7 @@ func (c *Client) SingleFlightLock(ctx context.Context, key string, expiration ti
 		flag := false
 		result := c.s.DoChan(key, func() (interface{}, error) {
 			flag = true
-			return c.Lock(ctx, key, expiration, try)
+			return c.TryLock(ctx, key, expiration, try)
 		})
 		select {
 		case res := <-result:
@@ -67,7 +67,7 @@ func (c *Client) SingleFlightLock(ctx context.Context, key string, expiration ti
 	}
 }
 
-func (c *Client) Lock(ctx context.Context, key string, expiration time.Duration, try RetryStrategy) (*lock, error) {
+func (c *Client) TryLock(ctx context.Context, key string, expiration time.Duration, try RetryStrategy) (*lock, error) {
 	value := uuid.New().String()
 	var ticker *time.Ticker
 	defer func() {

@@ -25,7 +25,7 @@ func TestClient_SingleFlightLock(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestClient_Lock(t *testing.T) {
+func TestClient_TryLock(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	type fields struct {
@@ -129,7 +129,7 @@ func TestClient_Lock(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), tt.args.timeout)
 			defer cancel()
-			got, err := c.Lock(ctx, tt.args.key, tt.args.expiration, tt.args.try)
+			got, err := c.TryLock(ctx, tt.args.key, tt.args.expiration, tt.args.try)
 			assert.Equal(t, tt.wantErr, err)
 			if err != nil {
 				return
